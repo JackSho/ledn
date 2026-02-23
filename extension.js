@@ -62,6 +62,11 @@ async function toggleCommentBlock(editor) {
     const active = editor.selection.active;
     let anchor = editor.selection.anchor;
 
+    // 用于跟踪是否需要移动光标
+    let shouldMoveCursor = false;
+    let wasUncommenting = false;
+    let cursorInsideForm = false;
+
     // 没有选中内容
     if (active.isEqual(anchor)) {
         const textline = editor.document.lineAt(anchor);
@@ -82,24 +87,35 @@ async function toggleCommentBlock(editor) {
                 semicolonLen = validText.length;
             }
             if (semicolonLen > 0) {
-                // 有分号时，全部删除
+                // 有分号时，全部删除（取消注释，光标在行首，不移动）
                 const start = new vscode.Position(anchor.line, offset);
                 const end = new vscode.Position(anchor.line, offset + semicolonLen);
-                editor.edit(editBuilder => {
+                await editor.edit(editBuilder => {
                     editBuilder.replace(new vscode.Range(start, end), '');
                 });
+                wasUncommenting = true;
+                cursorInsideForm = false; // 分号注释场景，光标不在 form 内部
             } else {
-                // 没有分号时，在选择区域的开始位置接入块注释
+                // 没有分号时，在选择区域的开始位置接入块注释（添加注释，移动）
                 const position = new vscode.Position(anchor.line, offset);
-                editor.edit(editBuilder => {
+                await editor.edit(editBuilder => {
                     editBuilder.insert(position, blockComment);
                 });
+                shouldMoveCursor = true;
             }
         }
         else {
+            // 删除块注释（取消注释，检查光标是否在 form 内部）
+            wasUncommenting = true;
+            cursorInsideForm = anchor.character >= index + commentLen;
+            if (cursorInsideForm) {
+                // 先将光标移动到 #_ 和 form 之间，删除后光标会在 form 开头
+                const formStart = new vscode.Position(anchor.line, index + commentLen);
+                editor.selection = new vscode.Selection(formStart, formStart);
+            }
             const start = new vscode.Position(anchor.line, index);
             const end = new vscode.Position(anchor.line, index + commentLen);
-            editor.edit(editBuilder => {
+            await editor.edit(editBuilder => {
                 editBuilder.replace(new vscode.Range(start, end), '');
             });
         }
@@ -107,25 +123,38 @@ async function toggleCommentBlock(editor) {
     else {
         anchor = anchor.isAfter(active) ? active : anchor;
         // 在选择区域的开始位置接入块注释
-        const textline = textEditor.document.lineAt(anchor);
+        const textline = editor.document.lineAt(anchor);
         const lineText = textline.text;
         const index = lineText.indexOf(blockComment);
         if (index != -1 && index == anchor.character - commentLen) {
+            // 删除块注释（取消注释，检查光标是否在 form 内部）
+            wasUncommenting = true;
+            cursorInsideForm = anchor.character >= index + commentLen;
+            if (cursorInsideForm) {
+                // 先将光标移动到 #_ 和 form 之间，删除后光标会在 form 开头
+                const formStart = new vscode.Position(anchor.line, index + commentLen);
+                editor.selection = new vscode.Selection(formStart, formStart);
+            }
             const start = new vscode.Position(anchor.line, index);
             const end = new vscode.Position(anchor.line, index + commentLen);
-            editor.edit(editBuilder => {
+            await editor.edit(editBuilder => {
                 editBuilder.replace(new vscode.Range(start, end), '');
             });
         } else {
-            editor.edit(editBuilder => {
+            // 添加块注释（添加注释，移动）
+            await editor.edit(editBuilder => {
                 editBuilder.insert(anchor, blockComment);
             });
+            shouldMoveCursor = true;
         }
     }
-    // 光标移动到下一个 form 的开始
-    vscode.commands.executeCommand("paredit.forwardSexp");
-    vscode.commands.executeCommand("paredit.forwardSexp");
-    vscode.commands.executeCommand("paredit.backwardSexp");
+
+    // 根据条件移动光标
+    if (shouldMoveCursor || (wasUncommenting && cursorInsideForm)) {
+        await vscode.commands.executeCommand("paredit.forwardSexp");
+        await vscode.commands.executeCommand("paredit.forwardSexp");
+        await vscode.commands.executeCommand("paredit.backwardSexp");
+    }
 }
 
 function insertNewlineBetweenElements(text) {
